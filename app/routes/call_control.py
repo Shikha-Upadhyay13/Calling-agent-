@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Response
 from twilio.rest import Client
-from twilio.twiml.voice_response import VoiceResponse
+from twilio.twiml.voice_response import Connect, VoiceResponse
 
 from app.config import settings
 
@@ -28,7 +28,13 @@ def start_call():
 @router.api_route("/twiml/answer", methods=["GET", "POST"])
 def twiml_answer():
     """Twilio fetches this once the call is answered (outbound test call
-    or a real inbound call to the Twilio number) and speaks the TwiML back."""
+    or a real inbound call to the Twilio number). Opens a bidirectional
+    Media Stream to /media-stream instead of just speaking and hanging up."""
+    wss_url = settings.public_base_url.replace("https://", "wss://").replace("http://", "ws://")
+
     response = VoiceResponse()
     response.say(GREETING_TEXT)
+    connect = Connect()
+    connect.stream(url=f"{wss_url}/media-stream")
+    response.append(connect)
     return Response(content=str(response), media_type="application/xml")
