@@ -35,6 +35,6 @@ def twiml_answer():
     response = VoiceResponse()
     response.say(GREETING_TEXT)
     connect = Connect()
-    connect.stream(url=f"{wss_url}/media-stream")
+    connect.stream(url=f"{wss_url}/media-stream", track="inbound_track")
     response.append(connect)
     return Response(content=str(response), media_type="application/xml")

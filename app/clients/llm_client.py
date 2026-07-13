@@ -1,8 +1,8 @@
-from groq import Groq
+from groq import AsyncGroq
 
 from app.config import settings
 
-_client = Groq(api_key=settings.groq_api_key)
+_client = AsyncGroq(api_key=settings.groq_api_key)
 
 MODEL = "llama-3.3-70b-versatile"
 
@@ -25,8 +25,13 @@ def build_system_prompt() -> str:
     return PERSONA_PROMPT
 
 
-def generate_reply(history: list[dict]) -> str:
-    """One-shot reply for a given conversation history (list of {role, content})."""
+async def stream_reply(history: list[dict]):
+    """Yields the reply text token-by-token as it's generated, so the caller
+    can start speaking the first sentence without waiting for the full reply
+    -- this is the main thing that makes turn-taking feel human-paced."""
     messages = [{"role": "system", "content": build_system_prompt()}] + history
-    response = _client.chat.completions.create(model=MODEL, messages=messages)
-    return response.choices[0].message.content
+    stream = await _client.chat.completions.create(model=MODEL, messages=messages, stream=True)
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
