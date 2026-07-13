@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.orchestrator.call_orchestrator import run_single_exchange
+from app.orchestrator.call_orchestrator import run_conversation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 @router.websocket("/media-stream")
 async def media_stream(websocket: WebSocket):
-    """Twilio Media Streams handler. Milestone C: runs one real STT -> LLM ->
-    TTS exchange instead of echoing audio back (Milestone B)."""
+    """Twilio Media Streams handler. Milestone D: runs a full multi-turn
+    conversation (STT -> LLM -> TTS, looped with history) until the caller
+    hangs up, instead of Milestone C's single exchange."""
     await websocket.accept()
     audio_queue: asyncio.Queue = asyncio.Queue()
     mark_events: asyncio.Queue = asyncio.Queue()
@@ -63,11 +64,11 @@ async def media_stream(websocket: WebSocket):
 
     if stream_sid:
         try:
-            await run_single_exchange(websocket, stream_sid, audio_queue, mark_events)
+            await run_conversation(websocket, stream_sid, audio_queue, mark_events)
         except asyncio.CancelledError:
-            logger.warning("run_single_exchange cancelled (caller likely hung up mid-processing)")
+            logger.warning("run_conversation cancelled (caller likely hung up mid-processing)")
         except Exception:
-            logger.exception("run_single_exchange crashed")
+            logger.exception("run_conversation crashed")
 
     receive_task.cancel()
     try:
