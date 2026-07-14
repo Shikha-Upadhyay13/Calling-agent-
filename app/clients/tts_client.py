@@ -22,16 +22,17 @@ def open_session():
     )
 
 
-async def synthesize(socket, text: str) -> bytes:
-    """Synthesizes one reply's audio on an already-open socket (see
-    open_session()). Safe to call repeatedly on the same socket across turns."""
-    audio = bytearray()
+async def synthesize_stream(socket, text: str):
+    """Yields raw mulaw audio chunks as Deepgram generates them, instead of
+    buffering the whole utterance before returning anything -- letting
+    playback start as soon as the first chunk arrives instead of waiting
+    for the full sentence to finish synthesizing (that wait was ~1.5-2.5s
+    per sentence). Safe to call repeatedly on the same open socket."""
     await socket.send_text(SpeakV1Text(type="Speak", text=text))
     await socket.send_flush()
     while True:
         msg = await socket.recv()
         if isinstance(msg, bytes):
-            audio.extend(msg)
+            yield msg
         elif type(msg).__name__ == "SpeakV1Flushed":
             break
-    return bytes(audio)

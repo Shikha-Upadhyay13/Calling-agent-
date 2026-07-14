@@ -18,9 +18,10 @@ async def run_conversation(
     websocket, stream_sid: str, incoming_audio: "asyncio.Queue", mark_events: "asyncio.Queue"
 ):
     """Multi-turn conversation with persistent history and persistent STT/TTS
-    connections. Replies are streamed and spoken sentence-by-sentence as soon
-    as each is ready (instead of waiting for the whole reply) so turn-taking
-    feels human-paced.
+    connections. Replies are streamed and spoken sentence-by-sentence, with
+    each sentence's audio itself streamed to Twilio as it's generated,
+    instead of waiting for the whole reply (or even a whole sentence) to
+    finish before any of it plays.
 
     Barge-in (stopping mid-sentence when the caller starts talking) was
     tried and pulled back out -- it kept self-triggering on every reply in
@@ -115,45 +116,39 @@ async def _stream_reply_and_speak(
                 continue
             spoken_sentences.append(sentence)
             logger.info("Agent saying: %s", sentence)
-            reply_audio = await _synthesize_with_timeout(tts_socket, sentence)
-            if reply_audio is not None:
-                await _speak(websocket, stream_sid, reply_audio, mark_events)
+            await _speak_sentence(websocket, stream_sid, tts_socket, sentence, mark_events)
 
     leftover = buffer.strip()
     if leftover:
         spoken_sentences.append(leftover)
         logger.info("Agent saying: %s", leftover)
-        reply_audio = await _synthesize_with_timeout(tts_socket, leftover)
-        if reply_audio is not None:
-            await _speak(websocket, stream_sid, reply_audio, mark_events)
+        await _speak_sentence(websocket, stream_sid, tts_socket, leftover, mark_events)
 
     return " ".join(spoken_sentences)
 
 
-async def _synthesize_with_timeout(tts_socket, text: str) -> bytes | None:
-    """TTS synthesis wrapped in a hard timeout -- without this, a hung
-    Deepgram connection blocks the whole conversation loop indefinitely
-    instead of failing loud. Returns None (skip this sentence) on timeout."""
+async def _speak_sentence(websocket, stream_sid: str, tts_socket, text: str, mark_events):
+    """Streams this sentence's TTS audio straight to Twilio as each chunk is
+    generated (instead of waiting for the whole sentence to finish
+    synthesizing first -- that alone was costing 1.5-2.5s per sentence),
+    then waits for Twilio's mark echo confirming playback actually
+    finished before returning."""
     try:
-        return await asyncio.wait_for(tts_client.synthesize(tts_socket, text), timeout=10)
+        total_bytes = await asyncio.wait_for(
+            _forward_tts_stream(websocket, stream_sid, tts_socket, text), timeout=15
+        )
     except asyncio.TimeoutError:
-        logger.error("TTS synthesis timed out after 10s for: %s", text)
-        return None
+        logger.error("TTS synthesis/streaming timed out for: %s", text)
+        return
 
+    if total_bytes == 0:
+        return
 
-async def _speak(websocket, stream_sid: str, reply_audio: bytes, mark_events: "asyncio.Queue"):
-    """Sends reply_audio to Twilio and waits for the mark echo confirming
-    playback actually finished before returning -- without this, moving to
-    the next sentence/turn can cut the caller off mid-sentence."""
-    logger.info("Sending %d bytes of reply audio back to Twilio", len(reply_audio))
-    for i in range(0, len(reply_audio), OUTBOUND_CHUNK_SIZE):
-        chunk = reply_audio[i : i + OUTBOUND_CHUNK_SIZE]
-        await websocket.send_text(build_media_message(stream_sid, chunk))
     mark_name = f"reply-done-{next(_mark_counter)}"
     await websocket.send_text(build_mark_message(stream_sid, mark_name))
 
     try:
-        expected_playback_s = len(reply_audio) / 8000
+        expected_playback_s = total_bytes / 8000
         timeout = max(5.0, expected_playback_s + 5.0)
         while True:
             seen = await asyncio.wait_for(mark_events.get(), timeout=timeout)
@@ -162,3 +157,23 @@ async def _speak(websocket, stream_sid: str, reply_audio: bytes, mark_events: "a
         logger.info("Twilio confirmed playback finished")
     except asyncio.TimeoutError:
         logger.warning("Never got playback-finished confirmation from Twilio (mark echo timed out)")
+
+
+async def _forward_tts_stream(websocket, stream_sid: str, tts_socket, text: str) -> int:
+    """Pulls audio chunks from Deepgram as they're generated and re-chunks
+    them into Twilio's 20ms frame size, forwarding each immediately instead
+    of buffering the whole sentence first."""
+    pending = bytearray()
+    total_bytes = 0
+    async for chunk in tts_client.synthesize_stream(tts_socket, text):
+        pending.extend(chunk)
+        while len(pending) >= OUTBOUND_CHUNK_SIZE:
+            frame = bytes(pending[:OUTBOUND_CHUNK_SIZE])
+            del pending[:OUTBOUND_CHUNK_SIZE]
+            await websocket.send_text(build_media_message(stream_sid, frame))
+            total_bytes += len(frame)
+    if pending:
+        await websocket.send_text(build_media_message(stream_sid, bytes(pending)))
+        total_bytes += len(pending)
+    logger.info("Streamed %d bytes of reply audio to Twilio", total_bytes)
+    return total_bytes
