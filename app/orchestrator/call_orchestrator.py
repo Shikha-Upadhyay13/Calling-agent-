@@ -15,7 +15,11 @@ _SENTENCE_END_RE = re.compile(r"([.!?])(\s+|$)")
 
 
 async def run_conversation(
-    websocket, stream_sid: str, incoming_audio: "asyncio.Queue", mark_events: "asyncio.Queue"
+    websocket,
+    stream_sid: str,
+    incoming_audio: "asyncio.Queue",
+    mark_events: "asyncio.Queue",
+    recorder=None,
 ):
     """Multi-turn conversation with persistent history and persistent STT/TTS
     connections. Replies are streamed and spoken sentence-by-sentence, with
@@ -55,10 +59,12 @@ async def run_conversation(
                     continue
 
                 logger.info("Caller said: %s", transcript)
+                if recorder:
+                    recorder.add_transcript_line("Caller", transcript)
                 history.append({"role": "user", "content": transcript})
 
                 reply_text = await _stream_reply_and_speak(
-                    websocket, stream_sid, history, tts_socket, mark_events
+                    websocket, stream_sid, history, tts_socket, mark_events, recorder
                 )
                 if reply_text:
                     history.append({"role": "assistant", "content": reply_text})
@@ -95,7 +101,7 @@ async def _next_transcript_or_end(stt_socket, stream_ended: asyncio.Event) -> st
 
 
 async def _stream_reply_and_speak(
-    websocket, stream_sid: str, history: list[dict], tts_socket, mark_events
+    websocket, stream_sid: str, history: list[dict], tts_socket, mark_events, recorder=None
 ) -> str:
     """Streams the LLM reply, speaking each completed sentence immediately
     instead of waiting for the full reply -- this is what makes the agent
@@ -116,12 +122,16 @@ async def _stream_reply_and_speak(
                 continue
             spoken_sentences.append(sentence)
             logger.info("Agent saying: %s", sentence)
+            if recorder:
+                recorder.add_transcript_line("Agent", sentence)
             await _speak_sentence(websocket, stream_sid, tts_socket, sentence, mark_events)
 
     leftover = buffer.strip()
     if leftover:
         spoken_sentences.append(leftover)
         logger.info("Agent saying: %s", leftover)
+        if recorder:
+            recorder.add_transcript_line("Agent", leftover)
         await _speak_sentence(websocket, stream_sid, tts_socket, leftover, mark_events)
 
     return " ".join(spoken_sentences)
